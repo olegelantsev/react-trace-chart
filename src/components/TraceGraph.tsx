@@ -65,7 +65,7 @@ const makeSpanKey = (serviceId: string, spanId: string) => `${serviceId}:${spanI
 
 const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedChange }: TraceGraphProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const serviceRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const serviceRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const spanRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(defaultExpandedIds));
   const [geometry, setGeometry] = useState<GeometryState>(initialGeometry);
@@ -87,7 +87,7 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
   );
 
   const registerServiceRef = useCallback((serviceId: string) => {
-    return (node: HTMLDivElement | null) => {
+    return (node: HTMLButtonElement | null) => {
       serviceRefs.current[serviceId] = node;
     };
   }, []);
