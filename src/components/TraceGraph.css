@@ -4,24 +4,98 @@
 
 .trace-graph {
   position: relative;
-  padding: 48px 48px 56px;
+  padding: 40px 40px 52px;
   background: radial-gradient(circle at top, #ffffff, #edf1ff 70%);
   border-radius: 32px;
   box-shadow: 0 25px 45px rgba(13, 31, 93, 0.12);
-  overflow: hidden;
   min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.trace-graph__controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 20px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.75);
+  box-shadow: inset 0 0 0 1px rgba(77, 124, 254, 0.08);
+  gap: 16px;
+}
+
+.trace-graph__controls-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #1f2555;
+  margin-right: 12px;
+}
+
+.trace-graph__zoom-slider {
+  width: 260px;
+  accent-color: #4d7cfe;
+}
+
+.trace-graph__zoom-buttons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  color: #1f2555;
+}
+
+.trace-graph__zoom-buttons button {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid rgba(77, 124, 254, 0.4);
+  background: white;
+  color: #1f2555;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease;
+}
+
+.trace-graph__zoom-buttons button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.trace-graph__zoom-buttons button:not(:disabled):hover {
+  background: rgba(77, 124, 254, 0.12);
+  transform: translateY(-1px);
+}
+
+.trace-graph__viewport {
+  position: relative;
+  overflow: auto;
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(110, 123, 172, 0.1);
+  max-height: 70vh;
+}
+
+.trace-graph__canvas {
+  position: relative;
+  min-width: 100%;
+  padding: 16px 16px 50px;
+  transform-origin: 0 0;
 }
 
 .trace-graph__lanes {
   display: flex;
-  gap: 48px;
+  flex-wrap: wrap;
+  gap: 32px 48px;
   position: relative;
   z-index: 1;
   align-items: flex-start;
+  padding-right: 24px;
+  min-width: max-content;
 }
 
 .trace-graph__lane {
-  width: 220px;
+  width: 240px;
   --accent: #4d7cfe;
 }
 
@@ -173,6 +247,7 @@
   inset: 0;
   z-index: 0;
   pointer-events: none;
+  overflow: visible;
 }
 
 .trace-graph__edge,
