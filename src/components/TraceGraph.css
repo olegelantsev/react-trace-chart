@@ -179,21 +179,12 @@
 
 .trace-graph__edge,
 .trace-graph__span-connector {
+  stroke-width: 3px;
   fill: none;
-  stroke-width: 3;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-dasharray: 10 14;
-  animation: trace-flow 2s linear infinite;
-}
-
-.trace-graph__edge {
-  stroke: rgba(77, 124, 254, 0.85);
-}
-
-.trace-graph__span-connector {
-  stroke: rgba(0, 188, 212, 0.95);
-  animation-duration: 1.4s;
+  stroke: var(--accent, #4d7cfe);
+  opacity: 0.95;
+  /* Remove animation */
+  animation: none !important;
 }
 
 /* drag handle in the top-right corner of the service card */
@@ -238,11 +229,5 @@
 .trace-graph__drag-handle:focus {
   outline: 2px solid rgba(77,124,254,0.25);
   outline-offset: 2px;
-}
-
-@keyframes trace-flow {
-  to {
-    stroke-dashoffset: -24;
-  }
 }
 
