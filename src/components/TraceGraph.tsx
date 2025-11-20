@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, useEffect } from 'react';
 import './TraceGraph.css';
 
 export type TraceSpan = {
@@ -70,6 +70,29 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
   const spanRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(defaultExpandedIds));
   const [geometry, setGeometry] = useState<GeometryState>(initialGeometry);
+
+  // new: absolute positions + drag state (pointer-based so services can be dropped anywhere)
+  const [positions, setPositions] = useState<Record<string, { left: number; top: number }>>({});
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  // keep service refs in sync with services prop (no ordering state needed)
+  useEffect(() => {
+    // ensure we at least have position keys for new services once geometry is measured
+    if (!geometry.viewport) return;
+    setPositions((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      services.forEach((s) => {
+        if (next[s.id]) return;
+        const box = geometry.services[s.id];
+        if (!box) return;
+        // place using measured top/left (box.left/top are relative to host)
+        next[s.id] = { left: Math.max(8, Math.round(box.left)), top: Math.max(8, Math.round(box.top)) };
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [services, geometry]);
 
   const toggleService = useCallback(
     (serviceId: string) => {
@@ -182,6 +205,83 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
       window.removeEventListener('resize', measure);
     };
   }, [services, expanded]);
+
+  // new: re-measure live during dragging / when positions change so connectors redraw immediately
+  useLayoutEffect(() => {
+    const host = containerRef.current;
+    if (!host) return;
+
+    const hostRect = host.getBoundingClientRect();
+    const serviceBoxes: Record<string, Box> = {};
+    const spanBoxes: Record<string, Box> = {};
+
+    services.forEach((service) => {
+      // prefer DOM rect where available so we keep accurate sizes,
+      // but if DOM hasn't updated yet we fall back to last measured geometry and apply positions override
+      const domEl = serviceRefs.current[service.id];
+      let rect: DOMRect | null = null;
+      if (domEl) {
+        rect = domEl.getBoundingClientRect();
+      }
+
+      const prev = geometry.services[service.id];
+      const width = rect ? rect.width : prev ? prev.right - prev.left : 240;
+      const height = rect ? rect.height : prev ? prev.bottom - prev.top : 56;
+
+      const pos = positions[service.id];
+      const left = pos ? pos.left : (rect ? rect.left - hostRect.left : prev ? prev.left : 16);
+      const top = pos ? pos.top : (rect ? rect.top - hostRect.top : prev ? prev.top : 16);
+
+      serviceBoxes[service.id] = {
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+        centerX: left + width / 2,
+        centerY: top + height / 2
+      };
+    });
+
+    services.forEach((service) => {
+      if (!expanded.has(service.id)) return;
+      service.spans.forEach((span) => {
+        const key = makeSpanKey(service.id, span.id);
+        const element = spanRefs.current[key];
+        if (!element) return;
+        const rect = element.getBoundingClientRect();
+        spanBoxes[key] = {
+          centerX: rect.right - hostRect.left,
+          centerY: rect.top - hostRect.top + rect.height / 2,
+          left: rect.left - hostRect.left,
+          right: rect.right - hostRect.left,
+          top: rect.top - hostRect.top,
+          bottom: rect.bottom - hostRect.top
+        };
+      });
+    });
+
+    // update geometry so serviceEdges / spanConnectors recompute using live positions
+    setGeometry((prev) => {
+      // shallow-equality check to avoid unnecessary updates
+      const sameServices = Object.keys(serviceBoxes).length === Object.keys(prev.services).length &&
+        Object.keys(serviceBoxes).every((k) => {
+          const a = (prev.services as any)[k];
+          const b = (serviceBoxes as any)[k];
+          return a && b && a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
+        });
+      const sameSpans = Object.keys(spanBoxes).length === Object.keys(prev.spans).length &&
+        Object.keys(spanBoxes).every((k) => {
+          const a = (prev.spans as any)[k];
+          const b = (spanBoxes as any)[k];
+          return a && b && a.left === b.left && a.top === b.top && a.right === b.right && a.bottom === b.bottom;
+        });
+      const viewport = { width: hostRect.width, height: hostRect.height };
+      if (sameServices && sameSpans && prev.viewport && prev.viewport.width === viewport.width && prev.viewport.height === viewport.height) {
+        return prev;
+      }
+      return { services: serviceBoxes, spans: spanBoxes, viewport };
+    });
+  }, [positions, draggingId, services, expanded, geometry.services, geometry.spans]);
 
   const serviceEdges = useMemo(() => {
     const result = edges
@@ -319,8 +419,82 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
     return connectors;
   }, [services, expanded, geometry.spans, geometry.services]);
 
+  // Pointer-based dragging so services can be dropped anywhere inside the container
+  const pointerState = useRef<{
+    pointerId: number;
+    originX: number;
+    originY: number;
+    startLeft: number;
+    startTop: number;
+    svcId: string;
+  } | null>(null);
+
+  const onPointerDown = useCallback((e: React.PointerEvent, svcId: string) => {
+    const target = e.currentTarget as HTMLElement;
+    if (!containerRef.current) return;
+    target.setPointerCapture(e.pointerId);
+    const hostRect = containerRef.current.getBoundingClientRect();
+    const rect = target.getBoundingClientRect();
+    const startLeft = rect.left - hostRect.left;
+    const startTop = rect.top - hostRect.top;
+
+    pointerState.current = {
+      pointerId: e.pointerId,
+      originX: e.clientX,
+      originY: e.clientY,
+      startLeft,
+      startTop,
+      svcId
+    };
+    setDraggingId(svcId);
+    e.preventDefault();
+  }, []);
+
+  const onPointerMove = useCallback((e: React.PointerEvent) => {
+    const state = pointerState.current;
+    if (!state || state.pointerId !== e.pointerId) return;
+    if (!containerRef.current) return;
+
+    const hostRect = containerRef.current.getBoundingClientRect();
+    const btn = serviceRefs.current[state.svcId];
+    const btnRect = btn?.getBoundingClientRect();
+    const width = btnRect ? btnRect.width : 240;
+    const height = btnRect ? btnRect.height : 56;
+
+    const dx = e.clientX - state.originX;
+    const dy = e.clientY - state.originY;
+    let nextLeft = state.startLeft + dx;
+    let nextTop = state.startTop + dy;
+
+    // clamp within container bounds
+    nextLeft = Math.max(4, Math.min(nextLeft, Math.max(4, (hostRect.width - width - 4))));
+    nextTop = Math.max(4, Math.min(nextTop, Math.max(4, (hostRect.height - height - 4))));
+
+    setPositions((prev) => {
+      const next = { ...prev, [state.svcId]: { left: Math.round(nextLeft), top: Math.round(nextTop) } };
+      return next;
+    });
+
+    // prevent text selection / native panning
+    e.preventDefault();
+  }, []);
+
+  const endPointerDrag = useCallback((e: React.PointerEvent) => {
+    const state = pointerState.current;
+    if (!state) return;
+    const target = e.currentTarget as HTMLElement;
+    try {
+      target.releasePointerCapture(state.pointerId);
+    } catch {
+      // ignore
+    }
+    pointerState.current = null;
+    setDraggingId(null);
+  }, []);
+
+  // render (services absolutely positioned based on positions state)
   return (
-    <div className="trace-graph" ref={containerRef}>
+    <div className="trace-graph" ref={containerRef} style={{ position: 'relative' }}>
       {geometry.viewport && (
         <svg
           className="trace-graph__edges"
@@ -372,14 +546,29 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
         </svg>
       )}
       <div className="trace-graph__lanes">
-        {services.map((service) => {
+        {services.map((service, idx) => {
           const isExpanded = expanded.has(service.id);
           const accent = service.accentColor ?? '#4d7cfe';
+          const isDragging = draggingId === service.id;
+
+          const pos = positions[service.id];
+          const laneStyle: React.CSSProperties = {
+            position: 'absolute',
+            left: pos ? pos.left : 16 + idx * 8,
+            top: pos ? pos.top : 16 + idx * 96,
+            zIndex: isDragging ? 999 : 1,
+            ['--accent' as any]: accent
+          };
+
           return (
             <div
               key={service.id}
-              className="trace-graph__lane"
-              style={{ ['--accent' as string]: accent }}
+              className={`trace-graph__lane ${isDragging ? 'is-dragging' : ''}`}
+              style={laneStyle}
+              onPointerDown={(e) => onPointerDown(e, service.id)}
+              onPointerMove={onPointerMove}
+              onPointerUp={endPointerDrag}
+              onPointerCancel={endPointerDrag}
             >
               <button
                 type="button"
