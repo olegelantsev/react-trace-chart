@@ -148,6 +148,16 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
         });
       });
 
+      // debug: print measurement summary
+      // eslint-disable-next-line no-console
+      console.debug('TraceGraph.measure', {
+        servicesCount: services.length,
+        expanded: Array.from(expanded),
+        hostRect: { width: hostRect.width, height: hostRect.height, left: hostRect.left, top: hostRect.top },
+        serviceBoxesCount: Object.keys(serviceBoxes).length,
+        spanBoxesCount: Object.keys(spanBoxes).length
+      });
+
       setGeometry({
         services: serviceBoxes,
         spans: spanBoxes,
@@ -174,11 +184,13 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
   }, [services, expanded]);
 
   const serviceEdges = useMemo(() => {
-    return edges
+    const result = edges
       .map((edge) => {
         const from = geometry.services[edge.from];
         const to = geometry.services[edge.to];
         if (!from || !to) {
+          // eslint-disable-next-line no-console
+          console.debug('TraceGraph.serviceEdges: skipping edge, missing geometry', { edge, fromExists: !!from, toExists: !!to });
           return null;
         }
         return {
@@ -191,33 +203,119 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
         };
       })
       .filter(Boolean) as { id: string; path: string; label: string }[];
+
+    // eslint-disable-next-line no-console
+    console.debug('TraceGraph.serviceEdges', { computed: result, servicesGeom: geometry.services, edges });
+
+    return result;
   }, [edges, geometry.services]);
 
   const spanConnectors = useMemo(() => {
     const connectors: { id: string; path: string; sourceLabel: string }[] = [];
-    services.forEach((service) => {
-      if (!expanded.has(service.id)) {
-        return;
-      }
-      service.spans.forEach((span) => {
-        if (!span.outboundServiceId) {
-          return;
+    const added = new Set<string>();
+
+    // Helper: add connector if not already present
+    const pushConnector = (id: string, srcLabel: string, start: { x: number; y: number }, end: { x: number; y: number }) => {
+      if (added.has(id)) return;
+      added.add(id);
+      connectors.push({
+        id,
+        sourceLabel: srcLabel,
+        path: buildCurvePath(start, end)
+      });
+    };
+
+    // 1) Outgoing connectors from unfolded spans (span -> span or span -> service)
+    services.forEach((svc) => {
+      if (!expanded.has(svc.id)) return;
+      svc.spans.forEach((span) => {
+        const spanBox = geometry.spans[makeSpanKey(svc.id, span.id)];
+        if (!spanBox) return;
+
+        if (span.outboundSpanRef) {
+          const parts = span.outboundSpanRef.split(':');
+          if (parts.length === 2) {
+            const targetSpanBox = geometry.spans[makeSpanKey(parts[0], parts[1])];
+            if (targetSpanBox) {
+              pushConnector(
+                `${svc.id}:${span.id}->${span.outboundSpanRef}`,
+                span.label,
+                { x: spanBox.right + 16, y: spanBox.centerY },
+                { x: targetSpanBox.left - 12, y: targetSpanBox.centerY }
+              );
+              return;
+            }
+          }
         }
-        const spanBox = geometry.spans[makeSpanKey(service.id, span.id)];
-        const targetBox = geometry.services[span.outboundServiceId];
-        if (!spanBox || !targetBox) {
-          return;
+
+        if (span.outboundServiceId) {
+          const targetBox = geometry.services[span.outboundServiceId];
+          if (targetBox) {
+            pushConnector(
+              `${svc.id}:${span.id}->${span.outboundServiceId}`,
+              span.label,
+              { x: spanBox.right + 16, y: spanBox.centerY },
+              { x: targetBox.left - 16, y: targetBox.centerY }
+            );
+          }
         }
-        connectors.push({
-          id: `${service.id}:${span.id}->${span.outboundServiceId}`,
-          sourceLabel: span.label,
-          path: buildCurvePath(
-            { x: spanBox.right + 16, y: spanBox.centerY },
-            { x: targetBox.left - 16, y: targetBox.centerY }
-          )
-        });
       });
     });
+
+    // 2) Incoming connectors into unfolded spans:
+    //    a) from other spans that explicitly target this span via outboundSpanRef
+    services.forEach((srcSvc) => {
+      srcSvc.spans.forEach((srcSpan) => {
+        if (!srcSpan.outboundSpanRef) return;
+        const parts = srcSpan.outboundSpanRef.split(':');
+        if (parts.length !== 2) return;
+        const targetKey = makeSpanKey(parts[0], parts[1]);
+        const targetBox = geometry.spans[targetKey];
+        if (!targetBox) return;
+        // only show incoming if target service is expanded
+        if (!expanded.has(parts[0])) return;
+        const srcBox = geometry.spans[makeSpanKey(srcSvc.id, srcSpan.id)] ?? geometry.services[srcSvc.id];
+        if (!srcBox) return;
+        pushConnector(
+          `${srcSvc.id}:${srcSpan.id}->${targetKey}:IN`,
+          srcSpan.label,
+          { x: srcBox.right + 16, y: srcBox.centerY },
+          { x: targetBox.left - 12, y: targetBox.centerY }
+        );
+      });
+    });
+
+    //    b) from services (service->service edges) into unfolded spans of the target service
+    edges.forEach((edge) => {
+      const targetSvcId = edge.to;
+      // find expanded service spans for the edge target
+      const targetService = services.find((s) => s.id === targetSvcId);
+      if (!targetService || !expanded.has(targetSvcId)) return;
+      const sourceBox = geometry.services[edge.from];
+      if (!sourceBox) return;
+      // connect service edge into each visible span of the expanded target service
+      targetService.spans.forEach((tspan) => {
+        const targetSpanBox = geometry.spans[makeSpanKey(targetSvcId, tspan.id)];
+        if (!targetSpanBox) return;
+        pushConnector(
+          `${edge.from}->${targetSvcId}:${tspan.id}`,
+          edge.label ?? `${edge.from} → ${targetSvcId}`,
+          { x: sourceBox.right, y: sourceBox.centerY },
+          { x: targetSpanBox.left - 12, y: targetSpanBox.centerY }
+        );
+      });
+    });
+
+    // debug: print connectors summary and any spans referenced but missing geometry
+    // eslint-disable-next-line no-console
+    console.debug('TraceGraph.spanConnectors', {
+      computedCount: connectors.length,
+      connectors,
+      spansGeomKeys: Object.keys(geometry.spans),
+      servicesGeomKeys: Object.keys(geometry.services),
+      expanded: Array.from(expanded)
+    });
+
     return connectors;
   }, [services, expanded, geometry.spans, geometry.services]);
 
