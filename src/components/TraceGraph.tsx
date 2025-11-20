@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, useEffect } from 'react';
 import './TraceGraph.css';
 
 export type TraceSpan = {
@@ -56,15 +56,85 @@ const initialGeometry: GeometryState = {
   viewport: null
 };
 
-const buildCurvePath = (start: { x: number; y: number }, end: { x: number; y: number }) => {
-  const deltaX = Math.max(Math.abs(end.x - start.x) * 0.5, 60);
-  return `M ${start.x} ${start.y} C ${start.x + deltaX} ${start.y}, ${end.x - deltaX} ${end.y}, ${end.x} ${end.y}`;
-};
-
 const makeSpanKey = (serviceId: string, spanId: string) => `${serviceId}:${spanId}`;
+
+/*
+  New implementation: render edges and span connectors using WebGL (via a <canvas>).
+  The DOM structure for services + spans is kept for interaction/measure/accessibility.
+  WebGL draws curved lines by sampling cubic bezier segments as a LINE_STRIP and draws
+  small triangle arrowheads for direction.
+*/
+
+const vertexShaderSrc = `
+  attribute vec2 a_position;
+  uniform vec2 u_resolution;
+  void main() {
+    // convert from pixels to clipspace
+    vec2 zeroToOne = a_position / u_resolution;
+    vec2 zeroToTwo = zeroToOne * 2.0;
+    vec2 clipSpace = zeroToTwo - 1.0;
+    // flip Y because DOM coordinates have origin top-left
+    gl_Position = vec4(clipSpace * vec2(1, -1), 0, 1);
+  }
+`;
+
+const fragmentShaderSrc = `
+  precision mediump float;
+  uniform vec4 u_color;
+  void main() {
+    gl_FragColor = u_color;
+  }
+`;
+
+function createShader(gl: WebGLRenderingContext, type: number, source: string) {
+  const shader = gl.createShader(type)!;
+  gl.shaderSource(shader, source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    const info = gl.getShaderInfoLog(shader);
+    gl.deleteShader(shader);
+    throw new Error('Could not compile shader:\n' + info);
+  }
+  return shader;
+}
+
+function createProgram(gl: WebGLRenderingContext, vSrc: string, fSrc: string) {
+  const v = createShader(gl, gl.VERTEX_SHADER, vSrc);
+  const f = createShader(gl, gl.FRAGMENT_SHADER, fSrc);
+  const p = gl.createProgram()!;
+  gl.attachShader(p, v);
+  gl.attachShader(p, f);
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    const info = gl.getProgramInfoLog(p);
+    gl.deleteProgram(p);
+    throw new Error('Could not link program:\n' + info);
+  }
+  return p;
+}
+
+function sampleCubicBezier(start: { x: number; y: number }, cp1: { x: number; y: number }, cp2: { x: number; y: number }, end: { x: number; y: number }, segments = 48) {
+  const pts: number[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const t = i / segments;
+    const mt = 1 - t;
+    const x = mt * mt * mt * start.x + 3 * mt * mt * t * cp1.x + 3 * mt * t * t * cp2.x + t * t * t * end.x;
+    const y = mt * mt * mt * start.y + 3 * mt * mt * t * cp1.y + 3 * mt * t * t * cp2.y + t * t * t * end.y;
+    pts.push(x, y);
+  }
+  return pts;
+}
+
+const buildCurveSamples = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+  const deltaX = Math.max(Math.abs(end.x - start.x) * 0.5, 60);
+  const cp1 = { x: start.x + deltaX, y: start.y };
+  const cp2 = { x: end.x - deltaX, y: end.y };
+  return sampleCubicBezier(start, cp1, cp2, end, 48);
+};
 
 const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedChange }: TraceGraphProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const serviceRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const spanRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(defaultExpandedIds));
@@ -172,106 +242,146 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
     };
   }, [services, expanded]);
 
-  const serviceEdges = useMemo(() => {
-    return edges
-      .map((edge) => {
-        const from = geometry.services[edge.from];
-        const to = geometry.services[edge.to];
-        if (!from || !to) {
-          return null;
-        }
-        return {
-          id: edge.id ?? `${edge.from}->${edge.to}`,
-          path: buildCurvePath(
-            { x: from.right, y: from.centerY },
-            { x: to.left, y: to.centerY }
-          ),
-          label: edge.label ?? `${edge.from} to ${edge.to}`
-        };
-      })
-      .filter(Boolean) as { id: string; path: string; label: string }[];
-  }, [edges, geometry.services]);
+  // Prepare line/connector samples to feed WebGL
+  const serviceEdgesSamples = useMemo(() => {
+    if (!geometry.viewport) return [];
+    const samples: { id: string; points: number[]; color: [number, number, number, number] }[] = [];
+    edges.forEach((edge) => {
+      const from = geometry.services[edge.from];
+      const to = geometry.services[edge.to];
+      if (!from || !to) return;
+      const pts = buildCurveSamples({ x: from.right, y: from.centerY }, { x: to.left, y: to.centerY });
+      samples.push({ id: edge.id ?? `${edge.from}->${edge.to}`, points: pts, color: [0.305, 0.486, 0.996, 1] }); // #4d7cfe
+    });
+    return samples;
+  }, [edges, geometry]);
 
-  const spanConnectors = useMemo(() => {
-    const connectors: { id: string; path: string; sourceLabel: string }[] = [];
+  const spanConnectorSamples = useMemo(() => {
+    if (!geometry.viewport) return [];
+    const samples: { id: string; points: number[]; color: [number, number, number, number] }[] = [];
     services.forEach((service) => {
-      if (!expanded.has(service.id)) {
-        return;
-      }
+      if (!expanded.has(service.id)) return;
       service.spans.forEach((span) => {
-        if (!span.outboundServiceId) {
-          return;
-        }
+        if (!span.outboundServiceId) return;
         const spanBox = geometry.spans[makeSpanKey(service.id, span.id)];
         const targetBox = geometry.services[span.outboundServiceId];
-        if (!spanBox || !targetBox) {
-          return;
-        }
-        connectors.push({
-          id: `${service.id}:${span.id}->${span.outboundServiceId}`,
-          sourceLabel: span.label,
-          path: buildCurvePath(
-            { x: spanBox.right + 16, y: spanBox.centerY },
-            { x: targetBox.left - 16, y: targetBox.centerY }
-          )
-        });
+        if (!spanBox || !targetBox) return;
+        const pts = buildCurveSamples(
+          { x: spanBox.right + 16, y: spanBox.centerY },
+          { x: targetBox.left - 16, y: targetBox.centerY }
+        );
+        samples.push({ id: `${service.id}:${span.id}->${span.outboundServiceId}`, points: pts, color: [0.0, 0.737, 0.831, 1] }); // #00bcd4
       });
     });
-    return connectors;
-  }, [services, expanded, geometry.spans, geometry.services]);
+    return samples;
+  }, [services, expanded, geometry]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const host = containerRef.current;
+    if (!canvas || !host || !geometry.viewport) return;
+
+    const gl = canvas.getContext('webgl', { antialias: true });
+    if (!gl) return;
+
+    // resize canvas to match css pixels
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.floor(geometry.viewport.width * dpr));
+    const height = Math.max(1, Math.floor(geometry.viewport.height * dpr));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      canvas.style.width = `${geometry.viewport.width}px`;
+      canvas.style.height = `${geometry.viewport.height}px`;
+    }
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    const program = createProgram(gl, vertexShaderSrc, fragmentShaderSrc);
+    gl.useProgram(program);
+
+    const posLoc = gl.getAttribLocation(program, 'a_position');
+    const resLoc = gl.getUniformLocation(program, 'u_resolution');
+    const colorLoc = gl.getUniformLocation(program, 'u_color');
+
+    // helper to draw a polyline (as LINE_STRIP)
+    const drawPolyline = (pointsPx: number[], color: [number, number, number, number]) => {
+      // convert points to device pixels (account for dpr)
+      const scaled: number[] = [];
+      for (let i = 0; i < pointsPx.length; i += 2) {
+        scaled.push(pointsPx[i] * dpr, pointsPx[i + 1] * dpr);
+      }
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(scaled), gl.STREAM_DRAW);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform2f(resLoc!, canvas.width, canvas.height);
+      gl.uniform4f(colorLoc!, color[0], color[1], color[2], color[3]);
+      // draw as line strip; lineWidth is implementation dependent in WebGL
+      gl.lineWidth(1);
+      gl.drawArrays(gl.LINE_STRIP, 0, scaled.length / 2);
+      gl.deleteBuffer(buffer);
+    };
+
+    // draw arrowhead (simple filled triangle) at the end of a sampled curve
+    const drawArrowTriangle = (tipPx: { x: number; y: number }, dirPx: { x: number; y: number }, color: [number, number, number, number]) => {
+      // perpendicular vector
+      const len = Math.hypot(dirPx.x, dirPx.y) || 1;
+      const ux = dirPx.x / len;
+      const uy = dirPx.y / len;
+      const size = 10 * dpr;
+      const left = { x: tipPx.x - ux * size + uy * (size * 0.5), y: tipPx.y - uy * size - ux * (size * 0.5) };
+      const right = { x: tipPx.x - ux * size - uy * (size * 0.5), y: tipPx.y - uy * size + ux * (size * 0.5) };
+      const tri = [tipPx.x * dpr, tipPx.y * dpr, left.x * dpr, left.y * dpr, right.x * dpr, right.y * dpr];
+      const buffer = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tri), gl.STREAM_DRAW);
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+      gl.uniform2f(resLoc!, canvas.width, canvas.height);
+      gl.uniform4f(colorLoc!, color[0], color[1], color[2], color[3]);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.deleteBuffer(buffer);
+    };
+
+    // draw service edges
+    serviceEdgesSamples.forEach((s) => {
+      drawPolyline(s.points, s.color);
+      // draw arrow at end: compute last segment direction
+      const pts = s.points;
+      if (pts.length >= 4) {
+        const px = pts[pts.length - 2];
+        const py = pts[pts.length - 1];
+        const prevx = pts[pts.length - 4];
+        const prevy = pts[pts.length - 3];
+        drawArrowTriangle({ x: px, y: py }, { x: px - prevx, y: py - prevy }, s.color);
+      }
+    });
+
+    // draw span connectors
+    spanConnectorSamples.forEach((s) => {
+      drawPolyline(s.points, s.color);
+      const pts = s.points;
+      if (pts.length >= 4) {
+        const px = pts[pts.length - 2];
+        const py = pts[pts.length - 1];
+        const prevx = pts[pts.length - 4];
+        const prevy = pts[pts.length - 3];
+        drawArrowTriangle({ x: px, y: py }, { x: px - prevx, y: py - prevy }, s.color);
+      }
+    });
+
+    // cleanup program
+    gl.useProgram(null);
+    gl.getExtension('OES_element_index_uint'); // no-op, try enable extensions
+  }, [geometry, serviceEdgesSamples, spanConnectorSamples]);
 
   return (
     <div className="trace-graph" ref={containerRef}>
-      {geometry.viewport && (
-        <svg
-          className="trace-graph__edges"
-          width={geometry.viewport.width}
-          height={geometry.viewport.height}
-        >
-          <defs>
-            <marker
-              id="trace-arrowhead"
-              markerWidth="10"
-              markerHeight="10"
-              refX="8"
-              refY="5"
-              orient="auto"
-            >
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#4d7cfe" />
-            </marker>
-            <marker
-              id="trace-span-arrow"
-              markerWidth="10"
-              markerHeight="10"
-              refX="8"
-              refY="5"
-              orient="auto"
-            >
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#00bcd4" />
-            </marker>
-          </defs>
-          {serviceEdges.map((edge) => (
-            <path
-              key={edge.id}
-              d={edge.path}
-              className="trace-graph__edge"
-              markerEnd="url(#trace-arrowhead)"
-            >
-              <title>{edge.label}</title>
-            </path>
-          ))}
-          {spanConnectors.map((connector) => (
-            <path
-              key={connector.id}
-              d={connector.path}
-              className="trace-graph__span-connector"
-              markerEnd="url(#trace-span-arrow)"
-            >
-              <title>{connector.sourceLabel}</title>
-            </path>
-          ))}
-        </svg>
-      )}
+      {/* WebGL canvas sits behind the DOM controls and renders edges/connectors */}
+      <canvas ref={canvasRef} className="trace-graph__gl-canvas" style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />
       <div className="trace-graph__lanes">
         {services.map((service) => {
           const isExpanded = expanded.has(service.id);
