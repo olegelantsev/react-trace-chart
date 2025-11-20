@@ -11,7 +11,9 @@ const services: TraceServiceNode[] = [
         id: 'ingress-accept',
         label: 'Accept HTTP',
         durationMs: 2.1,
-        outboundServiceId: 'auth'
+        outboundServiceId: 'auth',
+        // goes specifically into the auth.verify span
+        outboundSpanRef: 'auth:auth-verify'
       }
     ]
   },
@@ -25,7 +27,8 @@ const services: TraceServiceNode[] = [
         id: 'auth-verify',
         label: 'Verify Token',
         durationMs: 4.2,
-        outboundServiceId: 'profile'
+        outboundServiceId: 'profile',
+        outboundSpanRef: 'profile:profile-read'
       },
       {
         id: 'auth-cache',
@@ -44,7 +47,8 @@ const services: TraceServiceNode[] = [
         id: 'profile-read',
         label: 'Read document',
         durationMs: 8.5,
-        outboundServiceId: 'billing'
+        outboundServiceId: 'billing',
+        outboundSpanRef: 'billing:billing-charge'
       },
       {
         id: 'profile-aggregate',
@@ -64,13 +68,15 @@ const services: TraceServiceNode[] = [
         label: 'Create charge',
         durationMs: 12.5,
         outboundServiceId: 'ledger',
-        status: 'error'
+        status: 'error',
+        outboundSpanRef: 'ledger:ledger-write'
       },
       {
         id: 'billing-publish',
         label: 'Publish events',
         durationMs: 6.1,
-        outboundServiceId: 'ingress'
+        outboundServiceId: 'ingress',
+        outboundSpanRef: 'ingress:ingress-accept'
       }
     ]
   },

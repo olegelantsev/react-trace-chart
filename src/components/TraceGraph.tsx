@@ -5,6 +5,7 @@ export type TraceSpan = {
   id: string;
   label: string;
   outboundServiceId?: string;
+  outboundSpanRef?: string;
   durationMs?: number;
   status?: 'ok' | 'error';
 };
