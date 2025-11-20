@@ -59,7 +59,7 @@ const services = [
     },
     {
         id: 'billing',
-        label: 'Billing Service',
+        label: 'Billinge Service',
         accentColor: '#f97316',
         metrics: { avgLatencyMs: 18.6, throughputRps: 740, errorRatePct: 2.3 },
         spans: [
@@ -70,13 +70,6 @@ const services = [
                 outboundServiceId: 'ledger',
                 status: 'error',
                 outboundSpanRef: 'ledger:ledger-write'
-            },
-            {
-                id: 'billing-publish',
-                label: 'Publish events',
-                durationMs: 6.1,
-                outboundServiceId: 'ingress',
-                outboundSpanRef: 'ingress:ingress-accept'
             }
         ]
     },
@@ -99,7 +92,6 @@ const edges = [
     { from: 'auth', to: 'profile', label: 'user context' },
     { from: 'profile', to: 'billing', label: 'charge request' },
     { from: 'billing', to: 'ledger', label: 'ledger write' },
-    { from: 'billing', to: 'ingress', label: 'events' }
 ];
 const App = () => {
     return (_jsx("main", { style: { padding: '60px', background: '#e9ecf9', minHeight: '100vh' }, children: _jsx(TraceGraph, { services: services, edges: edges, defaultExpandedIds: ['auth'] }) }));

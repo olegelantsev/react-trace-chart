@@ -59,7 +59,7 @@ const services: TraceServiceNode[] = [
   },
   {
     id: 'billing',
-    label: 'Billing Service',
+    label: 'Billinge Service',
     accentColor: '#f97316',
     metrics: { avgLatencyMs: 18.6, throughputRps: 740, errorRatePct: 2.3 },
     spans: [
@@ -70,13 +70,6 @@ const services: TraceServiceNode[] = [
         outboundServiceId: 'ledger',
         status: 'error',
         outboundSpanRef: 'ledger:ledger-write'
-      },
-      {
-        id: 'billing-publish',
-        label: 'Publish events',
-        durationMs: 6.1,
-        outboundServiceId: 'ingress',
-        outboundSpanRef: 'ingress:ingress-accept'
       }
     ]
   },
@@ -100,7 +93,6 @@ const edges: TraceEdge[] = [
   { from: 'auth', to: 'profile', label: 'user context' },
   { from: 'profile', to: 'billing', label: 'charge request' },
   { from: 'billing', to: 'ledger', label: 'ledger write' },
-  { from: 'billing', to: 'ingress', label: 'events' }
 ];
 
 const App = () => {
