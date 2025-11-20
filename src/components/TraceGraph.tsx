@@ -468,9 +468,15 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
     startLeft: number;
     startTop: number;
     svcId: string;
+    offsetX?: number;
+    offsetY?: number;
   } | null>(null);
 
-  const onPointerDown = useCallback((e: React.PointerEvent, svcId: string) => {
+  // rAF batching for pointer moves
+  const rafRef = useRef<number | null>(null);
+  const pendingPositionsRef = useRef<Record<string, { left: number; top: number }>>({});
+
+   const onPointerDown = useCallback((e: React.PointerEvent, svcId: string) => {
     // Only start dragging when the pointerdown originates from the drag handle.
     // This preserves clicks on the service button (fold/unfold).
     const origin = e.target as Element | null;
@@ -499,20 +505,21 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
     // prevent native dragging/selection only when we started a drag
     e.preventDefault();
   }, []);
-
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    const state = pointerState.current;
-    if (!state || state.pointerId !== e.pointerId) return;
-    if (!containerRef.current) return;
-
-    const hostRect = containerRef.current.getBoundingClientRect();
-    const btn = serviceRefs.current[state.svcId];
-    const btnRect = btn?.getBoundingClientRect();
-    const width = btnRect ? btnRect.width : 240;
-    const height = btnRect ? btnRect.height : 56;
-
-    const dx = e.clientX - state.originX;
-    const dy = e.clientY - state.originY;
+ 
+   const onPointerMove = useCallback((e: React.PointerEvent) => {
+     const state = pointerState.current;
+     if (!state || state.pointerId !== e.pointerId) return;
+     if (!containerRef.current) return;
+ 
+     const hostRect = containerRef.current.getBoundingClientRect();
+     const btn = serviceRefs.current[state.svcId];
+     const btnRect = btn?.getBoundingClientRect();
+     const width = btnRect ? btnRect.width : 240;
+     const height = btnRect ? btnRect.height : 56;
+ 
+     const dx = e.clientX - state.originX;
+     const dy = e.clientY - state.originY;
+    // compute target (same logic you used before)
     let nextLeft = state.startLeft + dx;
     let nextTop = state.startTop + dy;
 
@@ -520,27 +527,48 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
     nextLeft = Math.max(4, Math.min(nextLeft, Math.max(4, (hostRect.width - width - 4))));
     nextTop = Math.max(4, Math.min(nextTop, Math.max(4, (hostRect.height - height - 4))));
 
-    setPositions((prev) => {
-      const next = { ...prev, [state.svcId]: { left: Math.round(nextLeft), top: Math.round(nextTop) } };
-      return next;
-    });
+    // Batch updates via rAF: write into pending ref and schedule a single setPositions per frame
+    pendingPositionsRef.current[state.svcId] = { left: Math.round(nextLeft), top: Math.round(nextTop) };
+    if (rafRef.current == null) {
+      rafRef.current = requestAnimationFrame(() => {
+        setPositions((prev) => {
+          const merged = { ...prev, ...pendingPositionsRef.current };
+          pendingPositionsRef.current = {};
+          return merged;
+        });
+        rafRef.current = null;
+      });
+    }
 
     // prevent text selection / native panning
     e.preventDefault();
-  }, []);
+   }, []);
+ 
+   const endPointerDrag = useCallback((e: React.PointerEvent) => {
+     const state = pointerState.current;
+     if (!state) return;
+     const target = e.currentTarget as HTMLElement;
+     try {
+       target.releasePointerCapture(state.pointerId);
+     } catch {
+       // ignore
+     }
 
-  const endPointerDrag = useCallback((e: React.PointerEvent) => {
-    const state = pointerState.current;
-    if (!state) return;
-    const target = e.currentTarget as HTMLElement;
-    try {
-      target.releasePointerCapture(state.pointerId);
-    } catch {
-      // ignore
-    }
-    pointerState.current = null;
-    setDraggingId(null);
-  }, []);
+     // clear drag state
+     pointerState.current = null;
+     setDraggingId(null);
+
+     // flush/cancel any pending rAF and apply pending positions once
+     if (rafRef.current != null) {
+       cancelAnimationFrame(rafRef.current);
+       rafRef.current = null;
+     }
+     const pending = pendingPositionsRef.current;
+     if (Object.keys(pending).length > 0) {
+       setPositions((prev) => ({ ...prev, ...pending }));
+       pendingPositionsRef.current = {};
+     }
+   }, []);
 
   // render (services absolutely positioned based on positions state)
   return (
@@ -602,12 +630,17 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
           const isDragging = draggingId === service.id;
 
           const pos = positions[service.id];
+          // Use transform for frequent moves (GPU compositing) and keep left/top anchored at 0
+          const translate = pos ? `translate3d(${pos.left}px, ${pos.top}px, 0)` : `translate3d(${-50 + idx * 8}px, ${-16 + idx * 96}px, 0)`;
           const laneStyle: React.CSSProperties = {
             position: 'absolute',
-            left: pos ? pos.left : 16 + idx * 8,
-            top: pos ? pos.top : 16 + idx * 96,
+            left: 0,
+            top: 0,
+            transform: translate,
+            WebkitTransform: translate,
             zIndex: isDragging ? 999 : 1,
-            ['--accent' as any]: accent
+            ['--accent' as any]: accent,
+            willChange: 'transform'
           };
 
           return (
