@@ -192,42 +192,39 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
-  background: #ffffff;
-  border: 1px solid rgba(0,0,0,0.06);
-  color: var(--accent, #4d7cfe);
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #4d7cfe, #7c3aed);
+  border: none;
+  color: white;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: grab;
-  z-index: 6;
-  box-shadow: 0 1px 0 rgba(0,0,0,0.06);
-  touch-action: none; /* important for pointer-drag on touch */
+  z-index: 10;
+  box-shadow: 0 2px 8px rgba(77, 124, 254, 0.3);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
 }
 
-/* little grip visual using pseudo-element */
-.trace-graph__drag-handle::before {
-  content: '';
-  display: block;
-  width: 10px;
-  height: 2px;
-  background: currentColor;
-  box-shadow: 0 4px 0 currentColor, 0 -4px 0 currentColor;
-  opacity: 0.9;
+.trace-graph__drag-handle:hover {
+  box-shadow: 0 4px 12px rgba(77, 124, 254, 0.5);
+  transform: scale(1.1);
 }
 
-/* active/grabbing state */
 .trace-graph__drag-handle:active,
 .trace-graph__lane.is-dragging .trace-graph__drag-handle {
   cursor: grabbing;
-  transform: translateY(0);
+  box-shadow: 0 6px 16px rgba(77, 124, 254, 0.6);
 }
 
-/* keyboard focus for accessibility */
-.trace-graph__drag-handle:focus {
-  outline: 2px solid rgba(77,124,254,0.25);
-  outline-offset: 2px;
+.trace-graph__drag-handle::before {
+  content: '';
+  display: block;
+  width: 8px;
+  height: 2px;
+  background: currentColor;
+  box-shadow: 0 5px 0 currentColor, 0 -5px 0 currentColor;
+  opacity: 1;
 }
 
