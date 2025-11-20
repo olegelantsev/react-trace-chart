@@ -79,18 +79,59 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
   useEffect(() => {
     // ensure we at least have position keys for new services once geometry is measured
     if (!geometry.viewport) return;
+
     setPositions((prev) => {
-      const next = { ...prev };
-      let changed = false;
-      services.forEach((s) => {
-        if (next[s.id]) return;
+      // if we already have positions for any service, only seed missing ones from measured boxes
+      const existingKeys = Object.keys(prev);
+      if (existingKeys.length > 0) {
+        const next = { ...prev };
+        let changed = false;
+        services.forEach((s) => {
+          if (next[s.id]) return;
+          const box = geometry.services[s.id];
+          if (!box) return;
+          next[s.id] = { left: Math.max(8, Math.round(box.left)), top: Math.max(8, Math.round(box.top)) };
+          changed = true;
+        });
+        return changed ? next : prev;
+      }
+
+      // No existing positions: distribute nodes around the viewport in a simple grid
+      const viewport = geometry.viewport!;
+      const n = services.length;
+      if (n === 0) return prev;
+
+      const cols = Math.ceil(Math.sqrt(n));
+      const rows = Math.ceil(n / cols);
+      const margin = 12;
+      const cellW = viewport.width / (cols + 1);
+      const cellH = viewport.height / (rows + 1);
+
+      const next: Record<string, { left: number; top: number }> = {};
+
+      services.forEach((s, idx) => {
+        const col = idx % cols;
+        const row = Math.floor(idx / cols);
+
+        // prefer measured size when available
         const box = geometry.services[s.id];
-        if (!box) return;
-        // place using measured top/left (box.left/top are relative to host)
-        next[s.id] = { left: Math.max(8, Math.round(box.left)), top: Math.max(8, Math.round(box.top)) };
-        changed = true;
+        const svcWidth = box ? Math.max(120, box.right - box.left) : 240;
+        const svcHeight = box ? Math.max(40, box.bottom - box.top) : 56;
+
+        const centerX = (col + 1) * cellW;
+        const centerY = (row + 1) * cellH;
+
+        let left = Math.round(centerX - svcWidth / 2);
+        let top = Math.round(centerY - svcHeight / 2);
+
+        // clamp to viewport with margin
+        left = Math.max(margin, Math.min(left, Math.max(margin, viewport.width - svcWidth - margin)));
+        top = Math.max(margin, Math.min(top, Math.max(margin, viewport.height - svcHeight - margin)));
+
+        next[s.id] = { left, top };
       });
-      return changed ? next : prev;
+
+      return next;
     });
   }, [services, geometry]);
 
@@ -430,11 +471,19 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
   } | null>(null);
 
   const onPointerDown = useCallback((e: React.PointerEvent, svcId: string) => {
-    const target = e.currentTarget as HTMLElement;
+    // Only start dragging when the pointerdown originates from the drag handle.
+    // This preserves clicks on the service button (fold/unfold).
+    const origin = e.target as Element | null;
+    if (!origin || !origin.closest('.trace-graph__drag-handle')) {
+      return;
+    }
+
+    const laneEl = e.currentTarget as HTMLElement;
     if (!containerRef.current) return;
-    target.setPointerCapture(e.pointerId);
+    // start pointer capture on the lane so we receive move/up events
+    laneEl.setPointerCapture(e.pointerId);
     const hostRect = containerRef.current.getBoundingClientRect();
-    const rect = target.getBoundingClientRect();
+    const rect = laneEl.getBoundingClientRect();
     const startLeft = rect.left - hostRect.left;
     const startTop = rect.top - hostRect.top;
 
@@ -447,6 +496,7 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
       svcId
     };
     setDraggingId(svcId);
+    // prevent native dragging/selection only when we started a drag
     e.preventDefault();
   }, []);
 
@@ -577,6 +627,17 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
                 onClick={() => toggleService(service.id)}
                 aria-expanded={isExpanded}
               >
+                {/* drag handle: clicking it should NOT toggle the service (prevent propagation on click) */}
+                <div
+                  className="trace-graph__drag-handle"
+                  role="button"
+                  aria-label="Drag service"
+                  onClick={(ev) => {
+                    // Prevent the button's onClick (fold/unfold) when handle is clicked.
+                    ev.stopPropagation();
+                    ev.preventDefault();
+                  }}
+                />
                 <div className="trace-graph__service-header">
                   <span className="trace-graph__service-pill" aria-hidden>
                     {service.label.slice(0, 2).toUpperCase()}
