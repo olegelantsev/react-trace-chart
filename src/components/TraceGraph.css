@@ -83,15 +83,22 @@
   transform-origin: 0 0;
 }
 
-.trace-graph__lanes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 32px 48px;
+.trace-graph__nodes {
   position: relative;
+  min-width: 100%;
+  min-height: 100%;
   z-index: 1;
-  align-items: flex-start;
-  padding-right: 24px;
-  min-width: max-content;
+}
+
+.trace-graph__node {
+  position: absolute;
+  touch-action: none;
+  cursor: grab;
+  transition: transform 0.15s ease;
+}
+
+.trace-graph__node:active {
+  cursor: grabbing;
 }
 
 .trace-graph__lane {

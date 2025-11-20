@@ -1,5 +1,5 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { ChangeEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import './TraceGraph.css';
 
 export type TraceSpan = {
@@ -64,9 +64,86 @@ const buildCurvePath = (start: { x: number; y: number }, end: { x: number; y: nu
 
 const makeSpanKey = (serviceId: string, spanId: string) => `${serviceId}:${spanId}`;
 
+type Position = {
+  x: number;
+  y: number;
+};
+
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 1.8;
 const ZOOM_STEP = 0.1;
+const COLUMN_WIDTH = 320;
+const ROW_HEIGHT = 220;
+const HORIZONTAL_PADDING = 140;
+const VERTICAL_PADDING = 140;
+const NODE_WIDTH = 240;
+const NODE_HEIGHT = 180;
+const CANVAS_PADDING = 400;
+
+const buildInitialPositions = (services: TraceServiceNode[], edges: TraceEdge[]): Record<string, Position> => {
+  const incomingMap = new Map<string, string[]>();
+  edges.forEach((edge) => {
+    if (!incomingMap.has(edge.to)) {
+      incomingMap.set(edge.to, []);
+    }
+    incomingMap.get(edge.to)!.push(edge.from);
+  });
+
+  const memo = new Map<string, number>();
+  const computeLevel = (serviceId: string, stack: Set<string> = new Set()): number => {
+    if (memo.has(serviceId)) {
+      return memo.get(serviceId)!;
+    }
+    if (stack.has(serviceId)) {
+      return 0;
+    }
+    const parents = incomingMap.get(serviceId) ?? [];
+    if (!parents.length) {
+      memo.set(serviceId, 0);
+      return 0;
+    }
+    stack.add(serviceId);
+    const level = Math.max(
+      ...parents.map((parent) => {
+        return computeLevel(parent, stack) + 1;
+      })
+    );
+    stack.delete(serviceId);
+    memo.set(serviceId, level);
+    return level;
+  };
+
+  const levelBuckets = new Map<number, string[]>();
+  services.forEach((service) => {
+    const level = computeLevel(service.id);
+    const bucket = levelBuckets.get(level) ?? [];
+    bucket.push(service.id);
+    levelBuckets.set(level, bucket);
+  });
+
+  const positions: Record<string, Position> = {};
+  Array.from(levelBuckets.entries()).forEach(([level, ids]) => {
+    ids.forEach((serviceId, index) => {
+      const totalHeight = (ids.length - 1) * ROW_HEIGHT;
+      const startY = VERTICAL_PADDING - totalHeight / 2;
+      positions[serviceId] = {
+        x: HORIZONTAL_PADDING + level * COLUMN_WIDTH,
+        y: startY + index * ROW_HEIGHT
+      };
+    });
+  });
+
+  services.forEach((service, index) => {
+    if (!positions[service.id]) {
+      positions[service.id] = {
+        x: HORIZONTAL_PADDING + (index % 4) * COLUMN_WIDTH,
+        y: VERTICAL_PADDING + Math.floor(index / 4) * ROW_HEIGHT
+      };
+    }
+  });
+
+  return positions;
+};
 
 const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedChange }: TraceGraphProps) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -75,6 +152,42 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(defaultExpandedIds));
   const [geometry, setGeometry] = useState<GeometryState>(initialGeometry);
   const [zoom, setZoom] = useState(0.9);
+  const [positions, setPositions] = useState<Record<string, Position>>(() => buildInitialPositions(services, edges));
+  const dragState = useRef<{
+    id: string;
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+    moved: boolean;
+  } | null>(null);
+  const recentlyDraggedRef = useRef<string | null>(null);
+
+  const initialPositions = useMemo(() => buildInitialPositions(services, edges), [services, edges]);
+
+  useEffect(() => {
+    setPositions((prev) => {
+      const next: Record<string, Position> = { ...prev };
+      let changed = false;
+      services.forEach((service) => {
+        if (!next[service.id]) {
+          next[service.id] = initialPositions[service.id] ?? {
+            x: HORIZONTAL_PADDING,
+            y: VERTICAL_PADDING
+          };
+          changed = true;
+        }
+      });
+      Object.keys(next).forEach((serviceId) => {
+        if (!services.find((service) => service.id === serviceId)) {
+          delete next[serviceId];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [services, initialPositions]);
 
   const clampZoom = useCallback((value: number) => {
     return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(value.toFixed(2))));
@@ -93,6 +206,71 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
       setZoom(clampZoom(value));
     },
     [clampZoom]
+  );
+
+  const handlePointerDown = useCallback(
+    (serviceId: string) => (event: ReactPointerEvent<HTMLDivElement>) => {
+      const position = positions[serviceId] ?? { x: 0, y: 0 };
+      dragState.current = {
+        id: serviceId,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        originX: position.x,
+        originY: position.y,
+        moved: false
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [positions]
+  );
+
+  const handlePointerMove = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      const drag = dragState.current;
+      if (!drag || drag.pointerId !== event.pointerId) {
+        return;
+      }
+      drag.moved = true;
+      const deltaX = (event.clientX - drag.startX) / zoom;
+      const deltaY = (event.clientY - drag.startY) / zoom;
+      setPositions((prev) => ({
+        ...prev,
+        [drag.id]: {
+          x: drag.originX + deltaX,
+          y: drag.originY + deltaY
+        }
+      }));
+    },
+    [zoom]
+  );
+
+  const handlePointerEnd = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragState.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    if (drag.moved) {
+      recentlyDraggedRef.current = drag.id;
+      requestAnimationFrame(() => {
+        if (recentlyDraggedRef.current === drag.id) {
+          recentlyDraggedRef.current = null;
+        }
+      });
+    }
+    dragState.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  }, []);
+
+  const handleNodeClickCapture = useCallback(
+    (serviceId: string) => (event: ReactMouseEvent<HTMLButtonElement>) => {
+      if (recentlyDraggedRef.current === serviceId) {
+        event.preventDefault();
+        event.stopPropagation();
+        recentlyDraggedRef.current = null;
+      }
+    },
+    []
   );
 
   const toggleService = useCallback(
@@ -199,7 +377,7 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
       hostEl?.removeEventListener('scroll', measure);
       window.removeEventListener('resize', measure);
     };
-  }, [services, expanded, zoom]);
+  }, [services, expanded, zoom, positions]);
 
   const serviceEdges = useMemo(() => {
     return edges
@@ -272,6 +450,22 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
     };
   }, [geometry]);
 
+  const layoutBounds = useMemo(() => {
+    const nodes = Object.values(positions);
+    if (!nodes.length) {
+      return {
+        width: geometry.viewport?.width ?? 1200,
+        height: geometry.viewport?.height ?? 800
+      };
+    }
+    const maxX = Math.max(...nodes.map((pos) => pos.x));
+    const maxY = Math.max(...nodes.map((pos) => pos.y));
+    return {
+      width: Math.max(geometry.viewport?.width ?? 0, maxX + NODE_WIDTH + CANVAS_PADDING),
+      height: Math.max(geometry.viewport?.height ?? 0, maxY + NODE_HEIGHT + CANVAS_PADDING)
+    };
+  }, [positions, geometry.viewport]);
+
   return (
     <div className="trace-graph">
       <div className="trace-graph__controls">
@@ -300,7 +494,12 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
       <div className="trace-graph__viewport" ref={containerRef}>
         <div
           className="trace-graph__canvas"
-          style={{ transform: `scale(${zoom})`, transformOrigin: '0 0' }}
+          style={{
+            width: layoutBounds.width,
+            height: layoutBounds.height,
+            transform: `scale(${zoom})`,
+            transformOrigin: '0 0'
+          }}
         >
           {svgDimensions && (
             <svg className="trace-graph__edges" width={svgDimensions.width} height={svgDimensions.height}>
@@ -348,71 +547,79 @@ const TraceGraph = ({ services, edges = [], defaultExpandedIds = [], onExpandedC
               ))}
             </svg>
           )}
-          <div className="trace-graph__lanes">
+          <div className="trace-graph__nodes" style={{ width: layoutBounds.width, height: layoutBounds.height }}>
             {services.map((service) => {
               const isExpanded = expanded.has(service.id);
               const accent = service.accentColor ?? '#4d7cfe';
+              const position = positions[service.id] ?? { x: HORIZONTAL_PADDING, y: VERTICAL_PADDING };
               return (
                 <div
                   key={service.id}
-                  className="trace-graph__lane"
-                  style={{ ['--accent' as string]: accent }}
+                  className="trace-graph__node"
+                  style={{ transform: `translate(${position.x}px, ${position.y}px)` }}
+                  onPointerDown={handlePointerDown(service.id)}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerEnd}
+                  onPointerCancel={handlePointerEnd}
                 >
-                  <button
-                    type="button"
-                    className={`trace-graph__service ${isExpanded ? 'is-expanded' : ''}`}
-                    ref={registerServiceRef(service.id)}
-                    onClick={() => toggleService(service.id)}
-                    aria-expanded={isExpanded}
-                  >
-                    <div className="trace-graph__service-header">
-                      <span className="trace-graph__service-pill" aria-hidden>
-                        {service.label.slice(0, 2).toUpperCase()}
-                      </span>
-                      <div>
-                        <p className="trace-graph__service-name">{service.label}</p>
-                        <p className="trace-graph__service-meta">
-                          {service.spans.length} spans ·{' '}
-                          {service.metrics?.avgLatencyMs
-                            ? `${service.metrics.avgLatencyMs.toFixed(1)} ms`
-                            : 'latency n/a'}
-                        </p>
-                      </div>
-                    </div>
-                    {service.metrics && (
-                      <div className="trace-graph__service-metrics">
-                        {service.metrics.throughputRps && (
-                          <span>{service.metrics.throughputRps.toFixed(0)} rps</span>
-                        )}
-                        {service.metrics.errorRatePct !== undefined && (
-                          <span>{service.metrics.errorRatePct.toFixed(2)}% errors</span>
-                        )}
-                      </div>
-                    )}
-                    <span className="trace-graph__service-toggle">
-                      {isExpanded ? 'Fold spans' : 'Unfold spans'}
-                    </span>
-                  </button>
-                  <div className={`trace-graph__span-panel ${isExpanded ? 'is-open' : ''}`}>
-                    {service.spans.map((span) => (
-                      <div
-                        key={span.id}
-                        ref={registerSpanRef(service.id, span.id)}
-                        className={`trace-graph__span trace-graph__span--${span.status ?? 'ok'}`}
-                      >
+                  <div className="trace-graph__lane" style={{ ['--accent' as string]: accent }}>
+                    <button
+                      type="button"
+                      className={`trace-graph__service ${isExpanded ? 'is-expanded' : ''}`}
+                      ref={registerServiceRef(service.id)}
+                      onClick={() => toggleService(service.id)}
+                      onClickCapture={handleNodeClickCapture(service.id)}
+                      aria-expanded={isExpanded}
+                    >
+                      <div className="trace-graph__service-header">
+                        <span className="trace-graph__service-pill" aria-hidden>
+                          {service.label.slice(0, 2).toUpperCase()}
+                        </span>
                         <div>
-                          <p className="trace-graph__span-label">{span.label}</p>
-                          {span.durationMs !== undefined && (
-                            <p className="trace-graph__span-meta">{span.durationMs.toFixed(1)} ms</p>
+                          <p className="trace-graph__service-name">{service.label}</p>
+                          <p className="trace-graph__service-meta">
+                            {service.spans.length} spans ·{' '}
+                            {service.metrics?.avgLatencyMs
+                              ? `${service.metrics.avgLatencyMs.toFixed(1)} ms`
+                              : 'latency n/a'}
+                          </p>
+                        </div>
+                      </div>
+                      {service.metrics && (
+                        <div className="trace-graph__service-metrics">
+                          {service.metrics.throughputRps && (
+                            <span>{service.metrics.throughputRps.toFixed(0)} rps</span>
+                          )}
+                          {service.metrics.errorRatePct !== undefined && (
+                            <span>{service.metrics.errorRatePct.toFixed(2)}% errors</span>
                           )}
                         </div>
-                        {span.outboundServiceId && (
-                          <span className="trace-graph__span-target">
-                            ↦ {span.outboundServiceId}
-                          </span>
-                        )}
-                      </div>
-                    ))}
+                      )}
+                      <span className="trace-graph__service-toggle">
+                        {isExpanded ? 'Fold spans' : 'Unfold spans'}
+                      </span>
+                    </button>
+                    <div className={`trace-graph__span-panel ${isExpanded ? 'is-open' : ''}`}>
+                      {service.spans.map((span) => (
+                        <div
+                          key={span.id}
+                          ref={registerSpanRef(service.id, span.id)}
+                          className={`trace-graph__span trace-graph__span--${span.status ?? 'ok'}`}
+                        >
+                          <div>
+                            <p className="trace-graph__span-label">{span.label}</p>
+                            {span.durationMs !== undefined && (
+                              <p className="trace-graph__span-meta">{span.durationMs.toFixed(1)} ms</p>
+                            )}
+                          </div>
+                          {span.outboundServiceId && (
+                            <span className="trace-graph__span-target">
+                              ↦ {span.outboundServiceId}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </div>
               );
